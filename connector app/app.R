@@ -50,32 +50,48 @@ ui <- page_navbar(
   
   nav_panel(
     "Home",
-    layout_column_wrap(
-      width = 1,
-      card(
-        card_header("Welcome"),
-        p("Log in, register, and explore the network from one place."),
-        p("Step 5: log in and project set up.")
+    tags$head(
+      tags$style(HTML("
+        .home-layout { gap: 1rem; }
+        .home-sidebar {
+          display: flex;
+          flex-direction: column;
+          gap: 1rem;
+          max-height: calc(100vh - 180px);
+          overflow-y: auto;
+          padding-right: .5rem;
+        }
+        .home-main {
+          display: flex;
+          flex-direction: column;
+          gap: 1rem;
+          min-height: calc(100vh - 180px);
+          overflow-y: auto;
+        }
+        .home-network-card { min-height: 540px; }
+      "))
+    ),
+    layout_sidebar(
+      sidebar = div(
+        class = "home-sidebar",
+        login_card_ui(),
+        register_card_ui()
       ),
-      card(
-        card_header("Database health check"),
-        div(
-          style = "display:flex; gap: .5rem; align-items:center;",
-          actionButton("db_check_btn", "Run DB health check", class = "btn-primary"),
-          tags$span("Verifies the DB file and required tables.")
+      fillable = TRUE,
+      class = "home-layout",
+      div(
+        class = "home-main",
+        card(
+          card_header("Welcome"),
+          p("Log in, register, and explore the network from one place."),
+          p("Step 5: log in and project set up.")
         ),
-        tags$hr(),
-        verbatimTextOutput("db_check_out")
+        uiOutput("projects_carousel_ui"),
+        uiOutput("network_home_ui")
       )
-    ),
-    layout_column_wrap(
-      width = 1/2,
-      login_card_ui(),
-      register_card_ui()
-    ),
-    uiOutput("projects_carousel_ui"),
-    uiOutput("network_map_ui")
+    )
   ),
+  nav_panel("Network Explorer", uiOutput("network_explorer_ui")),
   
   nav_panel("My Profile", uiOutput("profile_ui")),
   nav_panel("My Projects", uiOutput("projects_ui")),
@@ -242,33 +258,6 @@ server <- function(input, output, session) {
     updateTextInput(session, "profile_organisation", value = "")
     updateTextInput(session, "profile_role_title", value = "")
     updateTextInput(session, "profile_region", value = "")
-  })
-  
-  # ---- DB health check ----
-  output$db_check_out <- renderText({
-    hc <- db_health_check(con)
-    paste0(
-      "DB file: ", hc$db_file, "\n",
-      "DB exists: ", hc$db_exists, "\n\n",
-      "Required tables:\n  - ", paste(hc$tables_required, collapse = "\n  - "), "\n\n",
-      "Existing tables:\n  - ", paste(hc$tables_existing, collapse = "\n  - "), "\n\n",
-      "Missing tables:\n  - ", if (length(hc$missing_tables) == 0) "(none)" else paste(hc$missing_tables, collapse = "\n  - "), "\n\n",
-      "Health check OK: ", hc$ok
-    )
-  })
-  
-  observeEvent(input$db_check_btn, {
-    output$db_check_out <- renderText({
-      hc <- db_health_check(con)
-      paste0(
-        "DB file: ", hc$db_file, "\n",
-        "DB exists: ", hc$db_exists, "\n\n",
-        "Required tables:\n  - ", paste(hc$tables_required, collapse = "\n  - "), "\n\n",
-        "Existing tables:\n  - ", paste(hc$tables_existing, collapse = "\n  - "), "\n\n",
-        "Missing tables:\n  - ", if (length(hc$missing_tables) == 0) "(none)" else paste(hc$missing_tables, collapse = "\n  - "), "\n\n",
-        "Health check OK: ", hc$ok
-      )
-    })
   })
   
   # =========================
@@ -985,7 +974,23 @@ server <- function(input, output, session) {
     )
   })
   
-  output$network_map_ui <- renderUI({
+  output$network_home_ui <- renderUI({
+    nd <- network_data()$nodes
+    
+    card(
+      class = "home-network-card",
+      card_header("Collaboration network"),
+      if (!user$is_logged_in) {
+        div(class = "text-muted", "Log in to explore the live collaboration map.")
+      } else if (nrow(nd) == 0) {
+        div(class = "text-muted", "No people or projects to show yet.")
+      } else {
+        visNetworkOutput("network_home_view", height = "540px")
+      }
+    )
+  })
+  
+  output$network_explorer_ui <- renderUI({
     nd <- network_data()$nodes
     
     card(
@@ -1014,6 +1019,39 @@ server <- function(input, output, session) {
         )
       }
     )
+  })
+  
+  output$network_home_view <- renderVisNetwork({
+    req(user$is_logged_in)
+    nodes_vis <- network_data()$nodes
+    edges_vis <- network_data()$edges
+    req(nrow(nodes_vis) > 0)
+    
+    visNetwork(nodes_vis %>% transmute(
+      id,
+      label,
+      group,
+      title = paste0(
+        "<b>", name, "</b><br>",
+        "Organisation: ", institution, "<br>",
+        "Role: ", dept, "<br>",
+        "Region: ", region, "<br>",
+        "Admin: ", is_admin, "<br>",
+        "Keywords: ", keywords
+      )
+    ), edges_vis) %>%
+      visEdges(smooth = FALSE) %>%
+      visOptions(
+        highlightNearest = TRUE,
+        nodesIdSelection = FALSE
+      ) %>%
+      visInteraction(navigationButtons = TRUE) %>%
+      visPhysics(
+        solver = "forceAtlas2Based",
+        forceAtlas2Based = list(
+          gravitationalConstant = -150
+        )
+      )
   })
   
   network_nodes_filtered <- reactive({
