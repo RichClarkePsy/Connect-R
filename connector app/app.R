@@ -1,11 +1,48 @@
 library(shiny)
 library(bslib)
 library(sodium)
+library(visNetwork)
+library(DT)
+library(dplyr)
+library(stringr)
+library(tidyr)
 
 source("R/db.R")
 
 # Safer than relying on %||% being available everywhere
 `%||%` <- function(x, y) if (is.null(x) || length(x) == 0) y else x
+
+login_card_ui <- function() {
+  card(
+    card_header("Sign in"),
+    textInput("login_username", "Username"),
+    passwordInput("login_password", "Password"),
+    div(
+      style = "display:flex; gap:.5rem;",
+      actionButton("login_submit", "Login", class = "btn-primary"),
+      actionButton("login_clear", "Clear", class = "btn-outline-secondary")
+    ),
+    tags$hr(),
+    uiOutput("login_feedback")
+  )
+}
+
+register_card_ui <- function() {
+  card(
+    card_header("Create an account"),
+    p("This creates a new user record and stores a hashed password."),
+    textInput("reg_username", "Username", placeholder = "name"),
+    passwordInput("reg_password", "Password"),
+    passwordInput("reg_password2", "Confirm password"),
+    div(
+      style = "display:flex; gap:.5rem;",
+      actionButton("reg_submit", "Create account", class = "btn-primary"),
+      actionButton("reg_clear", "Clear", class = "btn-outline-secondary")
+    ),
+    tags$hr(),
+    uiOutput("reg_feedback")
+  )
+}
 
 ui <- page_navbar(
   title = "RCCS-Connect (Step 5)",
@@ -17,6 +54,7 @@ ui <- page_navbar(
       width = 1,
       card(
         card_header("Welcome"),
+        p("Log in, register, and explore the network from one place."),
         p("Step 5: log in and project set up.")
       ),
       card(
@@ -29,47 +67,14 @@ ui <- page_navbar(
         tags$hr(),
         verbatimTextOutput("db_check_out")
       )
-    )
-  ),
-  
-  nav_panel(
-    "Login",
+    ),
     layout_column_wrap(
-      width = 1,
-      card(
-        card_header("Sign in"),
-        textInput("login_username", "Username"),
-        passwordInput("login_password", "Password"),
-        div(
-          style = "display:flex; gap:.5rem;",
-          actionButton("login_submit", "Login", class = "btn-primary"),
-          actionButton("login_clear", "Clear", class = "btn-outline-secondary")
-        ),
-        tags$hr(),
-        uiOutput("login_feedback")
-      )
-    )
-  ),
-  
-  nav_panel(
-    "Register",
-    layout_column_wrap(
-      width = 1,
-      card(
-        card_header("Create an account"),
-        p("This creates a new user record and stores a hashed password."),
-        textInput("reg_username", "Username", placeholder = "name"),
-        passwordInput("reg_password", "Password"),
-        passwordInput("reg_password2", "Confirm password"),
-        div(
-          style = "display:flex; gap:.5rem;",
-          actionButton("reg_submit", "Create account", class = "btn-primary"),
-          actionButton("reg_clear", "Clear", class = "btn-outline-secondary")
-        ),
-        tags$hr(),
-        uiOutput("reg_feedback")
-      )
-    )
+      width = 1/2,
+      login_card_ui(),
+      register_card_ui()
+    ),
+    uiOutput("projects_carousel_ui"),
+    uiOutput("network_map_ui")
   ),
   
   nav_panel("My Profile", uiOutput("profile_ui")),
@@ -79,6 +84,100 @@ ui <- page_navbar(
   nav_spacer(),
   nav_item(uiOutput("auth_controls"))
 )
+
+build_network_data <- function(users_df) {
+  if (is.null(users_df) || nrow(users_df) == 0) {
+    empty <- tibble::tibble()
+    return(list(nodes = empty, edges = empty, memberships = empty))
+  }
+  
+  nodes <- users_df %>%
+    mutate(
+      name          = if_else(str_squish(display_name %||% "") == "", username, display_name %||% ""),
+      institution   = organisation %||% "",
+      institution   = if_else(str_squish(institution) == "", "Unknown", institution),
+      dept          = role_title,
+      keywords      = coalesce(keywords, ""),
+      label         = name,
+      group         = institution,
+      keywords_text = tolower(keywords)
+    ) %>%
+    transmute(
+      id = user_id,
+      name,
+      institution = group,
+      dept,
+      region,
+      is_admin,
+      keywords,
+      label,
+      group,
+      keywords_text
+    )
+  
+  memberships <- users_df %>%
+    select(user_id, projects) %>%
+    mutate(projects = coalesce(projects, "")) %>%
+    filter(str_squish(projects) != "") %>%
+    separate_rows(projects, sep = "\\s*;;\\s*") %>%
+    mutate(projects = str_squish(projects)) %>%
+    separate(
+      col = projects,
+      into = c("project_id", "project_name", "project_description", "role_part"),
+      sep = "\\s*\\|\\s*",
+      fill = "right",
+      extra = "merge"
+    ) %>%
+    mutate(
+      project_id = suppressWarnings(as.integer(str_squish(project_id))),
+      project_name = str_squish(project_name),
+      project_description = str_squish(project_description),
+      role = str_remove(str_squish(role_part), "^role=")
+    ) %>%
+    select(user_id, project_id, project_name, project_description, role) %>%
+    filter(!is.na(project_id))
+  
+  edges <- tibble::tibble()
+  if (nrow(memberships) > 0) {
+    edges <- memberships %>%
+      mutate(
+        project_name = str_squish(project_name),
+        project_description = str_squish(coalesce(project_description, ""))
+      ) %>%
+      distinct(user_id, project_id, project_name, project_description) %>%
+      inner_join(
+        memberships %>%
+          distinct(user_id, project_id),
+        by = "project_id",
+        suffix = c("_a", "_b")
+      ) %>%
+      filter(user_id_a < user_id_b) %>%
+      group_by(user_id_a, user_id_b) %>%
+      summarise(
+        weight = n_distinct(project_id),
+        shared_details = paste0(
+          sort(unique(paste0(project_name, " — ", project_description))),
+          collapse = "<br>"
+        ),
+        .groups = "drop"
+      ) %>%
+      transmute(
+        from  = user_id_a,
+        to    = user_id_b,
+        value = weight,
+        width = pmin(1 + weight, 6),
+        color = "rgba(120,120,120,0.25)",
+        title = paste0(
+          "<div style='max-width:260px; white-space:normal;'>",
+          "<b>Shared projects</b><br>",
+          shared_details,
+          "</div>"
+        )
+      )
+  }
+  
+  list(nodes = nodes, edges = edges, memberships = memberships)
+}
 
 server <- function(input, output, session) {
   
@@ -90,7 +189,6 @@ server <- function(input, output, session) {
   keyword_choices <- read.csv(file.path("data", "keywords.csv"), stringsAsFactors = FALSE)$keyword
   keyword_choices <- sort(unique(trimws(keyword_choices)))
   keyword_choices <- keyword_choices[nzchar(keyword_choices)]
-  
   
   # ---- Helper: locked page ----
   locked_page <- function(title = "Locked", body = "Please log in to view this page.") {
@@ -107,7 +205,21 @@ server <- function(input, output, session) {
   
   projects_refresh <- reactiveVal(0)
   
-  # Navbar controls (no more fake login)
+  all_projects_data <- reactive({
+    projects_refresh()
+    db_list_all_projects(con)
+  })
+  
+  network_export_data <- reactive({
+    projects_refresh()
+    db_export_users_projects_profiles(con)
+  })
+  
+  network_data <- reactive({
+    build_network_data(network_export_data())
+  })
+  
+  # Navbar controls
   output$auth_controls <- renderUI({
     if (!user$is_logged_in) {
       tags$span("Not signed in")
@@ -126,7 +238,6 @@ server <- function(input, output, session) {
     user$username <- NULL
     user$is_admin <- FALSE
     
-    # Clear profile inputs on logout (prevents “flash” of previous user data)
     updateTextInput(session, "profile_display_name", value = "")
     updateTextInput(session, "profile_organisation", value = "")
     updateTextInput(session, "profile_role_title", value = "")
@@ -191,7 +302,6 @@ server <- function(input, output, session) {
       return()
     }
     
-    # Lookup
     row <- db_get_user_by_username(con, username)
     if (nrow(row) == 0) {
       login_state$type <- "error"
@@ -199,7 +309,6 @@ server <- function(input, output, session) {
       return()
     }
     
-    # Verify password
     ok <- FALSE
     try({
       ok <- sodium::password_verify(row$password_hash[[1]], password)
@@ -211,7 +320,6 @@ server <- function(input, output, session) {
       return()
     }
     
-    # Success: set session state
     user$is_logged_in <- TRUE
     user$user_id <- row$user_id[[1]]
     user$username <- row$username[[1]]
@@ -220,12 +328,11 @@ server <- function(input, output, session) {
     login_state$type <- "success"
     login_state$msg <- "Logged in successfully."
     
-    # Optional: clear password field after login
     updateTextInput(session, "login_password", value = "")
   })
   
   # =========================
-  # Step 2: REGISTRATION (unchanged, still works)
+  # Step 2: REGISTRATION
   # =========================
   reg_state <- reactiveValues(type = NULL, msg = NULL)
   
@@ -275,6 +382,7 @@ server <- function(input, output, session) {
       
       updateTextInput(session, "reg_password", value = "")
       updateTextInput(session, "reg_password2", value = "")
+      projects_refresh(projects_refresh() + 1)
     }, error = function(e) {
       reg_state$type <- "error"
       reg_state$msg <- paste("Registration failed:", conditionMessage(e))
@@ -287,7 +395,6 @@ server <- function(input, output, session) {
       locked_page("My Profile (Locked)", "Please log in to view your profile.")
     } else {
       
-      # keep your existing onFlushed load
       session$onFlushed(function() {
         uid <- isolate(user$user_id)
         if (!is.null(uid)) load_profile_into_inputs(uid)
@@ -296,7 +403,6 @@ server <- function(input, output, session) {
       layout_column_wrap(
         width = 1/2,
         
-        # ---- Left: profile details ----
         card(
           card_header("My Profile"),
           textInput("profile_display_name", "Display name"),
@@ -312,14 +418,13 @@ server <- function(input, output, session) {
           uiOutput("profile_feedback")
         ),
         
-        # ---- Right: keywords ----
         card(
           card_header("Keywords"),
           p(class = "text-muted", "Select as many as you like from the controlled list."),
           selectizeInput(
             "profile_keywords",
             "Keywords",
-            choices = keyword_choices,   # make sure this exists in server scope
+            choices = keyword_choices,
             selected = NULL,
             multiple = TRUE,
             options = list(
@@ -328,18 +433,22 @@ server <- function(input, output, session) {
             )
           ),
           tags$hr(),
-          uiOutput("keywords_feedback")  # optional (see below)
-        )
+          uiOutput("keywords_feedback")
+        ),
         
-        # (Optional) keep your Debug card somewhere else, or add it as a third card
+        card(
+          card_header("Account actions"),
+          p("Delete your profile and login details (this also removes projects you created)."),
+          actionButton("delete_account_btn", "Delete my account", class = "btn-danger"),
+          tags$hr(),
+          uiOutput("account_delete_feedback")
+        )
       )
     }
   })
   
-  
-  
-  # ---- Profile persistence ----
   profile_state <- reactiveValues(type = NULL, msg = NULL)
+  output$keywords_feedback <- renderUI(NULL)
   
   output$profile_feedback <- renderUI({
     if (is.null(profile_state$type)) return(NULL)
@@ -373,13 +482,12 @@ server <- function(input, output, session) {
     updateSelectizeInput(
       session,
       "profile_keywords",
-      choices = keyword_choices,    # keep controlled vocab available
+      choices = keyword_choices,
       selected = selected_kws,
       server = TRUE
     )
   }
-
-    # Save button
+  
   observeEvent(input$profile_save, {
     req(user$is_logged_in)
     
@@ -390,7 +498,6 @@ server <- function(input, output, session) {
     keywords     <- input$profile_keywords %||% character(0)
     
     db_set_user_keywords(con, user_id = user$user_id, keywords = keywords)
-    
     
     tryCatch({
       db_update_user_profile(
@@ -404,9 +511,70 @@ server <- function(input, output, session) {
       
       profile_state$type <- "success"
       profile_state$msg <- "Profile saved."
+      projects_refresh(projects_refresh() + 1)
     }, error = function(e) {
       profile_state$type <- "error"
       profile_state$msg <- paste("Save failed:", conditionMessage(e))
+    })
+  })
+  
+  account_delete_state <- reactiveValues(type = NULL, msg = NULL)
+  
+  output$account_delete_feedback <- renderUI({
+    if (is.null(account_delete_state$type)) return(NULL)
+    class_name <- if (identical(account_delete_state$type, "success")) "alert alert-success" else "alert alert-danger"
+    div(class = class_name, account_delete_state$msg)
+  })
+  
+  observeEvent(input$delete_account_btn, {
+    req(user$is_logged_in)
+    account_delete_state$type <- NULL
+    account_delete_state$msg <- NULL
+    
+    showModal(modalDialog(
+      title = "Delete account",
+      p("This will delete your profile, keywords, login details, and any projects you created."),
+      p("Type your username to confirm."),
+      textInput("delete_confirm_username", "Username", value = ""),
+      footer = tagList(
+        modalButton("Cancel"),
+        actionButton("delete_account_confirm", "Delete account", class = "btn-danger")
+      )
+    ))
+  })
+  
+  observeEvent(input$delete_account_confirm, {
+    req(user$is_logged_in)
+    username_check <- trimws(input$delete_confirm_username %||% "")
+    
+    if (!identical(tolower(username_check), tolower(user$username))) {
+      account_delete_state$type <- "error"
+      account_delete_state$msg <- "Username does not match."
+      return()
+    }
+    
+    tryCatch({
+      db_delete_user(con, user$user_id)
+      account_delete_state$type <- "success"
+      account_delete_state$msg <- "Account deleted."
+      removeModal()
+      
+      user$is_logged_in <- FALSE
+      user$user_id <- NULL
+      user$username <- NULL
+      user$is_admin <- FALSE
+      
+      updateTextInput(session, "login_username", value = "")
+      updateTextInput(session, "login_password", value = "")
+      updateTextInput(session, "profile_display_name", value = "")
+      updateTextInput(session, "profile_organisation", value = "")
+      updateTextInput(session, "profile_role_title", value = "")
+      updateTextInput(session, "profile_region", value = "")
+      updateSelectizeInput(session, "profile_keywords", selected = character(0))
+      projects_refresh(projects_refresh() + 1)
+    }, error = function(e) {
+      account_delete_state$type <- "error"
+      account_delete_state$msg <- paste("Delete failed:", conditionMessage(e))
     })
   })
   
@@ -417,7 +585,7 @@ server <- function(input, output, session) {
       
       projects_refresh()
       
-      all_projects <- db_list_all_projects(con)
+      all_projects <- all_projects_data()
       user_projects <- db_list_projects_for_user(con, user$user_id)
       
       layout_column_wrap(
@@ -462,10 +630,6 @@ server <- function(input, output, session) {
     }
   })
   
-  # =========================
-  # Step 5 (Revised): Global Projects + Membership
-  # =========================
-  
   proj_create_state <- reactiveValues(type = NULL, msg = NULL)
   proj_join_state   <- reactiveValues(type = NULL, msg = NULL)
   proj_leave_state  <- reactiveValues(type = NULL, msg = NULL)
@@ -482,7 +646,6 @@ server <- function(input, output, session) {
         proj_join_state$msg)
   })
   
-  # Table of the user's memberships
   output$user_projects_cards <- renderUI({
     req(user$is_logged_in)
     projects_refresh()
@@ -508,7 +671,6 @@ server <- function(input, output, session) {
           div(
             style = "display:flex; gap:.5rem; flex-wrap:wrap;",
             
-            # Show Edit button ONLY if user is creator
             if (as.integer(p$created_by_user_id) == as.integer(user$user_id)) {
               actionButton(
                 paste0("edit_", p$project_id),
@@ -548,14 +710,11 @@ server <- function(input, output, session) {
         btn_id <- paste0("edit_", pid_local)
         
         observeEvent(input[[btn_id]], {
-          # Set edit mode
           editing_project_id(pid_local)
           
-          # Populate the existing create inputs
           updateTextInput(session, "proj_new_title", value = row$title[[1]] %||% "")
           updateTextAreaInput(session, "proj_new_desc", value = row$description[[1]] %||% "")
           
-          # Optional: nudge user
           proj_create_state$type <- "success"
           proj_create_state$msg <- "Editing mode: make changes above, then click “Save changes”."
         }, ignoreInit = TRUE)
@@ -563,11 +722,9 @@ server <- function(input, output, session) {
     }
   })
   
-  
-  
   observe({
     req(user$is_logged_in)
-    projects_refresh()  # re-run when membership changes
+    projects_refresh()
     
     df <- db_list_projects_for_user(con, user$user_id)
     if (nrow(df) == 0) return()
@@ -643,7 +800,6 @@ server <- function(input, output, session) {
         return()
       }
       
-      # Back to create mode
       editing_project_id(NULL)
       
       updateTextInput(session, "proj_new_title", value = "")
@@ -660,8 +816,6 @@ server <- function(input, output, session) {
     })
   })
   
-  
-  # Join an existing project
   observeEvent(input$proj_join_btn, {
     req(user$is_logged_in)
     
@@ -692,7 +846,6 @@ server <- function(input, output, session) {
       proj_join_state$msg <- paste("Join failed:", conditionMessage(e))
     })
   })
-  
   
   observeEvent(input$proj_create_btn, {
     req(user$is_logged_in)
@@ -764,7 +917,225 @@ server <- function(input, output, session) {
       )
     }
   })
+  
+  output$projects_carousel_ui <- renderUI({
+    projects_refresh()
+    projects <- all_projects_data()
+    
+    card(
+      card_header("Projects spotlight"),
+      if (nrow(projects) == 0) {
+        div(class = "text-muted", "No projects have been added yet. Create one to see it here.")
+      } else {
+        carousel_id <- "projectsCarousel"
+        items <- lapply(seq_len(nrow(projects)), function(i) {
+          proj <- projects[i, ]
+          tags$div(
+            class = paste("carousel-item", if (i == 1) "active" else ""),
+            tags$div(
+              class = "d-flex justify-content-center p-4",
+              tags$div(
+                style = "max-width:600px;",
+                tags$h4(proj$title),
+                tags$p(if (!is.null(proj$description[[1]]) && nzchar(proj$description[[1]])) proj$description[[1]] else "No description provided."),
+                tags$small(
+                  class = "text-muted",
+                  sprintf("Created by user %s", proj$created_by_user_id)
+                )
+              )
+            )
+          )
+        })
+        
+        controls <- NULL
+        if (nrow(projects) > 1) {
+          controls <- tagList(
+            tags$button(
+              class = "carousel-control-prev",
+              type = "button",
+              `data-bs-target` = paste0("#", carousel_id),
+              `data-bs-slide` = "prev",
+              tags$span(class = "carousel-control-prev-icon", `aria-hidden` = "true"),
+              tags$span(class = "visually-hidden", "Previous")
+            ),
+            tags$button(
+              class = "carousel-control-next",
+              type = "button",
+              `data-bs-target` = paste0("#", carousel_id),
+              `data-bs-slide` = "next",
+              tags$span(class = "carousel-control-next-icon", `aria-hidden` = "true"),
+              tags$span(class = "visually-hidden", "Next")
+            )
+          )
+        }
+        
+        tagList(
+          div(
+            id = carousel_id,
+            class = "carousel slide",
+            `data-bs-ride` = "carousel",
+            `data-bs-interval` = "7000",
+            tags$div(class = "carousel-inner", items),
+            controls
+          ),
+          tags$hr(),
+          p(class = "text-muted", "Cycle through projects or use the navigation to manage them.")
+        )
+      }
+    )
+  })
+  
+  output$network_map_ui <- renderUI({
+    nd <- network_data()$nodes
+    
+    card(
+      card_header("Collaboration network"),
+      if (!user$is_logged_in) {
+        div(class = "text-muted", "Log in to explore the live collaboration map.")
+      } else if (nrow(nd) == 0) {
+        div(class = "text-muted", "No people or projects to show yet.")
+      } else {
+        org_choices <- c("All", sort(unique(nd$institution)))
+        
+        tagList(
+          layout_column_wrap(
+            width = 1/3,
+            selectInput("network_org_filter", "Organisation filter:", choices = org_choices, selected = "All"),
+            textInput("network_keyword_filter", "Keyword filter:", value = ""),
+            checkboxInput("network_hide_isolates", "Hide people with no shared projects (current filter)", value = FALSE)
+          ),
+          visNetworkOutput("network_view", height = "520px"),
+          tags$hr(),
+          h5("Selected person"),
+          uiOutput("network_profile_details"),
+          tags$hr(),
+          h5("People in view"),
+          DTOutput("network_table")
+        )
+      }
+    )
+  })
+  
+  network_nodes_filtered <- reactive({
+    req(user$is_logged_in)
+    nodes <- network_data()$nodes
+    if (nrow(nodes) == 0) return(nodes)
+    
+    org <- input$network_org_filter %||% "All"
+    if (org != "All") {
+      nodes <- nodes %>% filter(institution == org)
+    }
+    
+    kw <- tolower(str_squish(input$network_keyword_filter %||% ""))
+    if (nzchar(kw)) {
+      nodes <- nodes %>% filter(str_detect(keywords_text, fixed(kw)))
+    }
+    nodes
+  })
+  
+  network_edges_filtered <- reactive({
+    req(user$is_logged_in)
+    edges <- network_data()$edges
+    ids <- network_nodes_filtered()$id
+    edges %>% filter(from %in% ids, to %in% ids)
+  })
+  
+  network_nodes_no_isolates <- reactive({
+    req(user$is_logged_in)
+    nodes <- network_nodes_filtered()
+    if (!isTRUE(input$network_hide_isolates)) return(nodes)
+    
+    edges <- network_edges_filtered()
+    keep_ids <- sort(unique(c(edges$from, edges$to)))
+    nodes %>% filter(id %in% keep_ids)
+  })
+  
+  output$network_view <- renderVisNetwork({
+    req(user$is_logged_in)
+    nodes_vis <- network_nodes_no_isolates()
+    edges_vis <- network_edges_filtered()
+    req(nrow(nodes_vis) > 0)
+    
+    visNetwork(nodes_vis %>% transmute(
+      id,
+      label,
+      group,
+      title = paste0(
+        "<b>", name, "</b><br>",
+        "Organisation: ", institution, "<br>",
+        "Role: ", dept, "<br>",
+        "Region: ", region, "<br>",
+        "Admin: ", is_admin, "<br>",
+        "Keywords: ", keywords
+      )
+    ), edges_vis) %>%
+      visEdges(smooth = FALSE) %>%
+      visOptions(
+        highlightNearest = TRUE,
+        nodesIdSelection = TRUE
+      ) %>%
+      visInteraction(navigationButtons = TRUE) %>%
+      visPhysics(
+        solver = "forceAtlas2Based",
+        forceAtlas2Based = list(
+          gravitationalConstant = -150
+        )
+      )
+  })
+  
+  output$network_table <- renderDT({
+    req(user$is_logged_in)
+    dat <- network_nodes_no_isolates() %>%
+      select(name, institution, dept, region, is_admin, keywords)
+    datatable(dat, options = list(pageLength = 10))
+  })
+  
+  output$network_profile_details <- renderUI({
+    req(user$is_logged_in)
+    nodes <- network_data()$nodes
+    if (nrow(nodes) == 0) {
+      return(div(class = "text-muted", "No data available."))
+    }
+    selected_id <- input$network_view_selectedNodes
+    if (is.null(selected_id) || length(selected_id) == 0) {
+      return(div(class = "text-muted", "Select a person from the network."))
+    }
+    person <- nodes %>% filter(id == selected_id[[1]])
+    if (nrow(person) == 0) {
+      return(div(class = "text-muted", "Person not found in current view."))
+    }
+    memberships <- network_data()$memberships %>%
+      filter(user_id == person$id) %>%
+      distinct(project_id, project_name, role) %>%
+      arrange(project_id)
+    proj_ui <- if (nrow(memberships) == 0) {
+      em("No projects listed.")
+    } else {
+      tags$ul(lapply(seq_len(nrow(memberships)), function(i) {
+        tags$li(paste0(
+          memberships$project_id[i], " — ",
+          memberships$project_name[i],
+          if (!is.na(memberships$role[i]) && memberships$role[i] != "") paste0(" (", memberships$role[i], ")") else ""
+        ))
+      }))
+    }
+    tagList(
+      strong(person$name),
+      br(),
+      paste("Organisation:", person$institution),
+      br(),
+      paste("Role:", person$dept),
+      br(),
+      paste("Region:", person$region),
+      br(),
+      paste("Admin:", person$is_admin),
+      br(),
+      paste("Keywords:", person$keywords),
+      br(), br(),
+      strong("Projects"),
+      proj_ui
+    )
+  })
 }
 
 shinyApp(ui, server)
-
