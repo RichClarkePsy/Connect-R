@@ -428,4 +428,43 @@ db_export_users_projects_profiles <- function(con) {
   out
 }
 
+db_delete_user <- function(con, user_id) {
+  stopifnot(length(user_id) == 1)
+  
+  DBI::dbWithTransaction(con, function(conn) {
+    created_projects <- DBI::dbGetQuery(
+      conn,
+      "
+      SELECT project_id
+      FROM projects
+      WHERE created_by_user_id = ?;
+      ",
+      params = list(user_id)
+    )$project_id
+    
+    if (length(created_projects) > 0) {
+      placeholders <- paste(rep("?", length(created_projects)), collapse = ",")
+      
+      DBI::dbExecute(
+        conn,
+        sprintf("DELETE FROM user_projects WHERE project_id IN (%s);", placeholders),
+        params = as.list(created_projects)
+      )
+      
+      DBI::dbExecute(
+        conn,
+        sprintf("DELETE FROM projects WHERE project_id IN (%s);", placeholders),
+        params = as.list(created_projects)
+      )
+    }
+    
+    DBI::dbExecute(conn, "DELETE FROM user_projects WHERE user_id = ?;", params = list(user_id))
+    DBI::dbExecute(conn, "DELETE FROM user_keywords WHERE user_id = ?;", params = list(user_id))
+    DBI::dbExecute(conn, "DELETE FROM audit_log WHERE user_id = ?;", params = list(user_id))
+    DBI::dbExecute(conn, "DELETE FROM users WHERE user_id = ?;", params = list(user_id))
+  })
+  
+  invisible(TRUE)
+}
+
 
