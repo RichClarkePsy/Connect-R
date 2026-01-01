@@ -14,6 +14,7 @@ source("R/db.R")
 
 login_card_ui <- function() {
   card(
+    class = "auth-card",
     card_header("Sign in"),
     textInput("login_username", "Username"),
     passwordInput("login_password", "Password"),
@@ -29,6 +30,7 @@ login_card_ui <- function() {
 
 register_card_ui <- function() {
   card(
+    class = "auth-card",
     card_header("Create an account"),
     p("This creates a new user record and stores a hashed password."),
     textInput("reg_username", "Username", placeholder = "name"),
@@ -46,20 +48,47 @@ register_card_ui <- function() {
 
 ui <- page_navbar(
   title = "RCCS-Connect (Step 5)",
-  theme = bs_theme(version = 5),
+  theme = bs_theme(
+    version = 5,
+    primary = "#2e7d32",
+    secondary = "#1b5e20",
+    success = "#43a047",
+    info = "#4caf50"
+  ),
   
   nav_panel(
     "Home",
     tags$head(
       tags$style(HTML("
+        body {
+          background: #f4faf4;
+        }
+        .navbar, .card-header {
+          background: linear-gradient(90deg, #1b5e20, #2e7d32);
+          color: #f1fff1;
+        }
+        .navbar-nav .nav-link, .navbar-brand, .navbar-text {
+          color: #f1fff1 !important;
+        }
+        .home-layout .sidebar {
+          min-width: 420px;
+        }
+        @media (max-width: 991px) {
+          .home-layout .sidebar {
+            min-width: 100%;
+          }
+        }
         .home-layout { gap: 1rem; }
         .home-sidebar {
           display: flex;
           flex-direction: column;
           gap: 1rem;
-          max-height: calc(100vh - 180px);
-          overflow-y: auto;
+          max-height: none;
+          overflow: visible;
           padding-right: .5rem;
+        }
+        .home-sidebar .auth-card {
+          min-height: 360px;
         }
         .home-main {
           display: flex;
@@ -69,6 +98,21 @@ ui <- page_navbar(
           overflow-y: auto;
         }
         .home-network-card { min-height: 540px; }
+        .projects-carousel-controls {
+          display: flex;
+          justify-content: center;
+          gap: .75rem;
+          margin-top: .5rem;
+        }
+        .projects-carousel-controls .btn {
+          min-width: 140px;
+        }
+        .network-explorer-card {
+          min-height: 900px;
+        }
+        #network_view {
+          min-height: 700px !important;
+        }
       "))
     ),
     layout_sidebar(
@@ -83,8 +127,8 @@ ui <- page_navbar(
         class = "home-main",
         card(
           card_header("Welcome"),
-          p("Log in, register, and explore the network from one place."),
-          p("Step 5: log in and project set up.")
+          p("RCCS-Connect helps researchers discover collaborators, organise project teams, and see where expertise is concentrated across the network."),
+          p("Create a profile, register or sign in, then join or launch projects so the collaboration map stays up to date. Use the explorer to filter by organisation or keyword and find people working in similar spaces.")
         ),
         uiOutput("projects_carousel_ui"),
         uiOutput("network_home_ui")
@@ -116,7 +160,7 @@ build_network_data <- function(users_df) {
       keywords      = coalesce(keywords, ""),
       label         = name,
       group         = institution,
-      keywords_text = tolower(keywords)
+      keywords_text = tolower(str_squish(str_replace_all(keywords, "\\s*;;\\s*", ", ")))
     ) %>%
     transmute(
       id = user_id,
@@ -234,6 +278,13 @@ server <- function(input, output, session) {
   network_data <- reactive({
     build_network_data(network_export_data())
   })
+  
+  parse_keyword_tokens <- function(raw_text) {
+    raw_text <- tolower(raw_text %||% "")
+    tokens <- str_split(raw_text, "\\s*[;,]\\s*")[[1]]
+    tokens <- unique(str_trim(tokens))
+    tokens[nzchar(tokens)]
+  }
   
   # Navbar controls
   output$auth_controls <- renderUI({
@@ -937,6 +988,7 @@ server <- function(input, output, session) {
         })
         
         controls <- NULL
+        control_buttons <- NULL
         if (nrow(projects) > 1) {
           controls <- tagList(
             tags$button(
@@ -956,6 +1008,24 @@ server <- function(input, output, session) {
               tags$span(class = "visually-hidden", "Next")
             )
           )
+          
+          control_buttons <- div(
+            class = "projects-carousel-controls",
+            tags$button(
+              class = "btn btn-outline-success",
+              type = "button",
+              `data-bs-target` = paste0("#", carousel_id),
+              `data-bs-slide` = "prev",
+              "Previous project"
+            ),
+            tags$button(
+              class = "btn btn-success",
+              type = "button",
+              `data-bs-target` = paste0("#", carousel_id),
+              `data-bs-slide` = "next",
+              "Next project"
+            )
+          )
         }
         
         tagList(
@@ -967,6 +1037,7 @@ server <- function(input, output, session) {
             tags$div(class = "carousel-inner", items),
             controls
           ),
+          control_buttons,
           tags$hr(),
           p(class = "text-muted", "Cycle through projects or use the navigation to manage them.")
         )
@@ -994,6 +1065,7 @@ server <- function(input, output, session) {
     nd <- network_data()$nodes
     
     card(
+      class = "network-explorer-card",
       card_header("Collaboration network"),
       if (!user$is_logged_in) {
         div(class = "text-muted", "Log in to explore the live collaboration map.")
@@ -1009,10 +1081,7 @@ server <- function(input, output, session) {
             textInput("network_keyword_filter", "Keyword filter:", value = ""),
             checkboxInput("network_hide_isolates", "Hide people with no shared projects (current filter)", value = FALSE)
           ),
-          visNetworkOutput("network_view", height = "520px"),
-          tags$hr(),
-          h5("Selected person"),
-          uiOutput("network_profile_details"),
+          visNetworkOutput("network_view", height = "700px"),
           tags$hr(),
           h5("People in view"),
           DTOutput("network_table")
@@ -1064,9 +1133,10 @@ server <- function(input, output, session) {
       nodes <- nodes %>% filter(institution == org)
     }
     
-    kw <- tolower(str_squish(input$network_keyword_filter %||% ""))
-    if (nzchar(kw)) {
-      nodes <- nodes %>% filter(str_detect(keywords_text, fixed(kw)))
+    kw_tokens <- parse_keyword_tokens(input$network_keyword_filter)
+    if (length(kw_tokens) > 0) {
+      pattern <- paste(str_replace_all(kw_tokens, "([\\W])", "\\\\\\1"), collapse = "|")
+      nodes <- nodes %>% filter(str_detect(keywords_text, regex(pattern, ignore_case = TRUE)))
     }
     nodes
   })
@@ -1126,53 +1196,6 @@ server <- function(input, output, session) {
     dat <- network_nodes_no_isolates() %>%
       select(name, institution, dept, region, is_admin, keywords)
     datatable(dat, options = list(pageLength = 10))
-  })
-  
-  output$network_profile_details <- renderUI({
-    req(user$is_logged_in)
-    nodes <- network_data()$nodes
-    if (nrow(nodes) == 0) {
-      return(div(class = "text-muted", "No data available."))
-    }
-    selected_id <- input$network_view_selectedNodes
-    if (is.null(selected_id) || length(selected_id) == 0) {
-      return(div(class = "text-muted", "Select a person from the network."))
-    }
-    person <- nodes %>% filter(id == selected_id[[1]])
-    if (nrow(person) == 0) {
-      return(div(class = "text-muted", "Person not found in current view."))
-    }
-    memberships <- network_data()$memberships %>%
-      filter(user_id == person$id) %>%
-      distinct(project_id, project_name, role) %>%
-      arrange(project_id)
-    proj_ui <- if (nrow(memberships) == 0) {
-      em("No projects listed.")
-    } else {
-      tags$ul(lapply(seq_len(nrow(memberships)), function(i) {
-        tags$li(paste0(
-          memberships$project_id[i], " — ",
-          memberships$project_name[i],
-          if (!is.na(memberships$role[i]) && memberships$role[i] != "") paste0(" (", memberships$role[i], ")") else ""
-        ))
-      }))
-    }
-    tagList(
-      strong(person$name),
-      br(),
-      paste("Organisation:", person$institution),
-      br(),
-      paste("Role:", person$dept),
-      br(),
-      paste("Region:", person$region),
-      br(),
-      paste("Admin:", person$is_admin),
-      br(),
-      paste("Keywords:", person$keywords),
-      br(), br(),
-      strong("Projects"),
-      proj_ui
-    )
   })
 }
 
