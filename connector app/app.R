@@ -1,3 +1,4 @@
+# Core libraries and UI dependencies.
 library(shiny)
 library(bslib)
 library(sodium)
@@ -7,13 +8,16 @@ library(dplyr)
 library(stringr)
 library(tidyr)
 
+# Database helpers.
 source("R/db.R")
 
-# Safer than relying on %||% being available everywhere
+# Utility: safer than relying on %||% being available everywhere.
 `%||%` <- function(x, y) if (is.null(x) || length(x) == 0) y else x
 
+# Static choices for organisation filters.
 organisation_choices <- c("NHS", "UoG", "Both NHS & UoG", "Other")
 
+# Login card UI chunk.
 login_card_ui <- function() {
   card(
     class = "auth-card",
@@ -30,6 +34,7 @@ login_card_ui <- function() {
   )
 }
 
+# Registration card UI chunk.
 register_card_ui <- function() {
   card(
     class = "auth-card",
@@ -48,6 +53,7 @@ register_card_ui <- function() {
   )
 }
 
+# Main navigation layout and page styling.
 ui <- page_navbar(
   title = "RCCS-Connect (Step 5)",
   theme = bs_theme(
@@ -148,6 +154,7 @@ ui <- page_navbar(
   nav_item(uiOutput("auth_controls"))
 )
 
+# Build graph data from users + projects for the network views.
 build_network_data <- function(users_df) {
   if (is.null(users_df) || nrow(users_df) == 0) {
     empty <- tibble::tibble()
@@ -248,13 +255,15 @@ build_network_data <- function(users_df) {
   list(nodes = nodes, edges = edges, memberships = memberships)
 }
 
+# Server logic for authentication, profiles, projects, and network views.
 server <- function(input, output, session) {
   
-  # ---- DB ----
+  # ---- DB: connection + seed data ----
   con <- db_connect()
   onStop(function() db_disconnect(con))
   db_init(con)
   
+  # ---- Lookup data: keywords ----
   keyword_choices <- read.csv(file.path("data", "keywords.csv"), stringsAsFactors = FALSE)$keyword
   keyword_choices <- sort(unique(trimws(keyword_choices)))
   keyword_choices <- keyword_choices[nzchar(keyword_choices)]
@@ -264,7 +273,7 @@ server <- function(input, output, session) {
     layout_column_wrap(width = 1, card(card_header(title), p(body)))
   }
   
-  # ---- Session user state (REAL) ----
+  # ---- Session user state ----
   user <- reactiveValues(
     is_logged_in = FALSE,
     user_id = NULL,
@@ -311,7 +320,7 @@ server <- function(input, output, session) {
     tokens[nzchar(tokens)]
   }
   
-  # Navbar controls
+  # ---- Navbar controls ----
   output$auth_controls <- renderUI({
     if (!user$is_logged_in) {
       tags$span("Not signed in")
@@ -1072,6 +1081,7 @@ server <- function(input, output, session) {
     )
   })
   
+  # ---- Home: network preview card ----
   output$network_home_ui <- renderUI({
     nd <- network_data()$nodes
     
@@ -1088,12 +1098,14 @@ server <- function(input, output, session) {
     )
   })
   
+  # ---- Network explorer: keyword options ----
   network_keyword_options <- reactive({
     nodes <- network_data()$nodes
     profile_keywords <- extract_keyword_options(nodes$keywords %||% character(0))
     sort(unique(c(keyword_choices, profile_keywords)))
   })
   
+  # ---- Network explorer: filters + graph ----
   output$network_explorer_ui <- renderUI({
     nd <- network_data()$nodes
     
@@ -1133,6 +1145,7 @@ server <- function(input, output, session) {
     )
   })
   
+  # ---- Network home: graph rendering ----
   output$network_home_view <- renderVisNetwork({
     req(user$is_logged_in)
     nodes_vis <- network_data()$nodes
@@ -1170,6 +1183,7 @@ server <- function(input, output, session) {
       )
   })
   
+  # ---- Network explorer: filter nodes ----
   network_nodes_filtered <- reactive({
     req(user$is_logged_in)
     nodes <- network_data()$nodes
@@ -1188,6 +1202,7 @@ server <- function(input, output, session) {
     nodes
   })
   
+  # ---- Network explorer: filter edges ----
   network_edges_filtered <- reactive({
     req(user$is_logged_in)
     edges <- network_data()$edges
@@ -1195,6 +1210,7 @@ server <- function(input, output, session) {
     edges %>% filter(from %in% ids, to %in% ids)
   })
   
+  # ---- Network explorer: optionally hide isolates ----
   network_nodes_no_isolates <- reactive({
     req(user$is_logged_in)
     nodes <- network_nodes_filtered()
@@ -1205,6 +1221,7 @@ server <- function(input, output, session) {
     nodes %>% filter(id %in% keep_ids)
   })
   
+  # ---- Network explorer: graph rendering ----
   output$network_view <- renderVisNetwork({
     req(user$is_logged_in)
     nodes_vis <- network_nodes_no_isolates()
@@ -1230,8 +1247,7 @@ server <- function(input, output, session) {
       visGroups(groupname = "Other", color = "#9e9e9e") %>%
       visEdges(smooth = FALSE) %>%
       visOptions(
-        highlightNearest = TRUE,
-        nodesIdSelection = TRUE
+        highlightNearest = TRUE
       ) %>%
       visInteraction(navigationButtons = TRUE) %>%
       visPhysics(
@@ -1242,6 +1258,7 @@ server <- function(input, output, session) {
       )
   })
   
+  # ---- Network explorer: table output ----
   output$network_table <- renderDT({
     req(user$is_logged_in)
     dat <- network_nodes_no_isolates() %>%
