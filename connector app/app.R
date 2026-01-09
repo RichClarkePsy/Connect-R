@@ -12,6 +12,8 @@ source("R/db.R")
 # Safer than relying on %||% being available everywhere
 `%||%` <- function(x, y) if (is.null(x) || length(x) == 0) y else x
 
+organisation_choices <- c("NHS", "UoG", "Both NHS & UoG", "Other")
+
 login_card_ui <- function() {
   card(
     class = "auth-card",
@@ -71,7 +73,7 @@ ui <- page_navbar(
           color: #f1fff1 !important;
         }
         .home-layout .sidebar {
-          min-width: 420px;
+          min-width: 520px;
         }
         @media (max-width: 991px) {
           .home-layout .sidebar {
@@ -89,6 +91,7 @@ ui <- page_navbar(
         }
         .home-sidebar .auth-card {
           min-height: 360px;
+          width: 100%;
         }
         .home-main {
           display: flex;
@@ -151,11 +154,17 @@ build_network_data <- function(users_df) {
     return(list(nodes = empty, edges = empty, memberships = empty))
   }
   
+  normalize_organisation <- function(value) {
+    value <- str_squish(value %||% "")
+    if (!nzchar(value)) return("Other")
+    if (value %in% organisation_choices) return(value)
+    "Other"
+  }
+  
   nodes <- users_df %>%
     mutate(
       name          = if_else(str_squish(display_name %||% "") == "", username, display_name %||% ""),
-      institution   = organisation %||% "",
-      institution   = if_else(str_squish(institution) == "", "Unknown", institution),
+      institution   = vapply(organisation, normalize_organisation, character(1)),
       dept          = role_title,
       keywords      = coalesce(keywords, ""),
       label         = name,
@@ -279,9 +288,25 @@ server <- function(input, output, session) {
     build_network_data(network_export_data())
   })
   
-  parse_keyword_tokens <- function(raw_text) {
-    raw_text <- tolower(raw_text %||% "")
-    tokens <- str_split(raw_text, "\\s*[;,]\\s*")[[1]]
+  parse_keyword_tokens <- function(raw_input) {
+    if (is.null(raw_input)) return(character(0))
+    
+    if (is.character(raw_input) && length(raw_input) > 1) {
+      tokens <- raw_input
+    } else {
+      raw_text <- tolower(raw_input %||% "")
+      tokens <- str_split(raw_text, "\\s*[;,]\\s*")[[1]]
+    }
+    
+    tokens <- tolower(tokens)
+    tokens <- unique(str_trim(tokens))
+    tokens[nzchar(tokens)]
+  }
+
+  extract_keyword_options <- function(keyword_values) {
+    if (is.null(keyword_values) || length(keyword_values) == 0) return(character(0))
+    raw <- tolower(keyword_values)
+    tokens <- unlist(str_split(raw, "\\s*(?:;;|,|;)\\s*"))
     tokens <- unique(str_trim(tokens))
     tokens[nzchar(tokens)]
   }
@@ -306,7 +331,7 @@ server <- function(input, output, session) {
     user$is_admin <- FALSE
     
     updateTextInput(session, "profile_display_name", value = "")
-    updateTextInput(session, "profile_organisation", value = "")
+    updateSelectInput(session, "profile_organisation", selected = "Other")
     updateTextInput(session, "profile_role_title", value = "")
     updateTextInput(session, "profile_region", value = "")
   })
@@ -446,7 +471,7 @@ server <- function(input, output, session) {
         card(
           card_header("My Profile"),
           textInput("profile_display_name", "Display name"),
-          textInput("profile_organisation", "Organisation"),
+          selectInput("profile_organisation", "Organisation", choices = organisation_choices, selected = "Other"),
           textInput("profile_role_title", "Role / job title"),
           textInput("profile_region", "Region"),
           
@@ -510,7 +535,9 @@ server <- function(input, output, session) {
     }
     
     updateTextInput(session, "profile_display_name", value = row$display_name[[1]] %||% "")
-    updateTextInput(session, "profile_organisation", value = row$organisation[[1]] %||% "")
+    org_value <- row$organisation[[1]] %||% ""
+    org_value <- if (org_value %in% organisation_choices) org_value else "Other"
+    updateSelectInput(session, "profile_organisation", selected = org_value)
     updateTextInput(session, "profile_role_title", value = row$role_title[[1]] %||% "")
     updateTextInput(session, "profile_region", value = row$region[[1]] %||% "")
     
@@ -607,7 +634,7 @@ server <- function(input, output, session) {
       updateTextInput(session, "login_username", value = "")
       updateTextInput(session, "login_password", value = "")
       updateTextInput(session, "profile_display_name", value = "")
-      updateTextInput(session, "profile_organisation", value = "")
+      updateSelectInput(session, "profile_organisation", selected = "Other")
       updateTextInput(session, "profile_role_title", value = "")
       updateTextInput(session, "profile_region", value = "")
       updateSelectizeInput(session, "profile_keywords", selected = character(0))
@@ -1061,6 +1088,12 @@ server <- function(input, output, session) {
     )
   })
   
+  network_keyword_options <- reactive({
+    nodes <- network_data()$nodes
+    profile_keywords <- extract_keyword_options(nodes$keywords %||% character(0))
+    sort(unique(c(keyword_choices, profile_keywords)))
+  })
+  
   output$network_explorer_ui <- renderUI({
     nd <- network_data()$nodes
     
@@ -1072,13 +1105,23 @@ server <- function(input, output, session) {
       } else if (nrow(nd) == 0) {
         div(class = "text-muted", "No people or projects to show yet.")
       } else {
-        org_choices <- c("All", sort(unique(nd$institution)))
+        org_choices <- c("All", organisation_choices)
         
         tagList(
           layout_column_wrap(
             width = 1/3,
             selectInput("network_org_filter", "Organisation filter:", choices = org_choices, selected = "All"),
-            textInput("network_keyword_filter", "Keyword filter:", value = ""),
+            selectizeInput(
+              "network_keyword_filter",
+              "Keyword filter:",
+              choices = network_keyword_options(),
+              selected = NULL,
+              multiple = TRUE,
+              options = list(
+                placeholder = "Start typing to search keywords...",
+                maxOptions = 2000
+              )
+            ),
             checkboxInput("network_hide_isolates", "Hide people with no shared projects (current filter)", value = FALSE)
           ),
           visNetworkOutput("network_view", height = "700px"),
@@ -1109,6 +1152,10 @@ server <- function(input, output, session) {
         "Keywords: ", keywords
       )
     ), edges_vis) %>%
+      visGroups(groupname = "UoG", color = "#279952") %>%
+      visGroups(groupname = "NHS", color = "#1764a2") %>%
+      visGroups(groupname = "Both NHS & UoG", color = "#1aa6a6") %>%
+      visGroups(groupname = "Other", color = "#9e9e9e") %>%
       visEdges(smooth = FALSE) %>%
       visOptions(
         highlightNearest = TRUE,
@@ -1177,6 +1224,10 @@ server <- function(input, output, session) {
         "Keywords: ", keywords
       )
     ), edges_vis) %>%
+      visGroups(groupname = "UoG", color = "#279952") %>%
+      visGroups(groupname = "NHS", color = "#1764a2") %>%
+      visGroups(groupname = "Both NHS & UoG", color = "#1aa6a6") %>%
+      visGroups(groupname = "Other", color = "#9e9e9e") %>%
       visEdges(smooth = FALSE) %>%
       visOptions(
         highlightNearest = TRUE,
