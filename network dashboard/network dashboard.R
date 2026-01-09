@@ -1,15 +1,13 @@
 # app.R ---------------------------------------------------------------
-# Collaboration network from users table
-# Edges = users sharing at least one project
+# Build a collaboration network from users that share projects.
 
+# Load dependencies used across data prep and UI.
 library(shiny)
 library(tidyverse)
 library(visNetwork)
 library(DT)
 
-# --------------------------------------------------------------------
-# 0) Expect: users data already exists
-# --------------------------------------------------------------------
+# Read the users data and validate required fields.
 users <- read_csv("sample_users.csv")
 
 stopifnot(exists("users"))
@@ -18,11 +16,9 @@ stopifnot(all(c(
   "region","is_admin","keywords","projects"
 ) %in% names(users)))
 
-# --------------------------------------------------------------------
-# 1) WRANGLE: Nodes + edges from project overlap
-# --------------------------------------------------------------------
+# Wrangle nodes and edges based on project overlap.
 
-# ---- Nodes (people) -------------------------------------------------
+# Build node metadata for each person.
 nodes <- users %>%
   mutate(
     name          = if_else(str_squish(display_name) == "", username, display_name),
@@ -46,8 +42,8 @@ nodes <- users %>%
     keywords_text
   )
 
-# ---- Project memberships (long) -------------------------------------
-# projects string format:
+# Expand project memberships into a long format.
+# Expected projects string format:
 # "2 | project 2 | description ... | role=creator ;; 3 | project 3 | ... | role=member"
 memberships <- users %>%
   select(user_id, projects) %>%
@@ -71,8 +67,8 @@ memberships <- users %>%
   select(user_id, project_id, project_name, project_description, role) %>%
   filter(!is.na(project_id))
 
-# ---- Edges: user-user if share a project ----------------------------
-# Build all pairs within each project, then collapse to unique edges with weights
+# Build weighted edges between users who share projects.
+# Build all pairs within each project, then collapse to unique edges with weights.
 edges <- memberships %>%
   mutate(
     project_name = str_squish(project_name),
@@ -109,14 +105,9 @@ edges <- memberships %>%
     )
   )
 
+# Note: visNetwork can render isolates (nodes with no edges) by default.
 
-
-# (Optional) If you want to show isolates too, keep nodes as-is.
-# visNetwork will happily show nodes with no edges.
-
-# --------------------------------------------------------------------
-# 2) Shiny UI
-# --------------------------------------------------------------------
+# Define the Shiny UI layout.
 ui <- fluidPage(
   titlePanel("Collaboration Network (Shared Projects)"),
   
@@ -162,12 +153,10 @@ ui <- fluidPage(
   )
 )
 
-# --------------------------------------------------------------------
-# 3) Shiny server
-# --------------------------------------------------------------------
+# Define the Shiny server logic.
 server <- function(input, output, session) {
   
-  # Filter nodes based on organisation + keyword
+  # Filter nodes based on organisation + keyword.
   filtered_nodes <- reactive({
     dat <- nodes
     
@@ -183,13 +172,13 @@ server <- function(input, output, session) {
     dat
   })
   
-  # Filter edges to only include links between visible nodes
+  # Filter edges to only include links between visible nodes.
   filtered_edges <- reactive({
     ids <- filtered_nodes()$id
     edges %>% filter(from %in% ids, to %in% ids)
   })
   
-  # Optionally hide isolates within the current filter
+  # Optionally hide isolates within the current filter.
   filtered_nodes_no_isolates <- reactive({
     dat <- filtered_nodes()
     if (!isTRUE(input$hide_isolates)) return(dat)
@@ -204,6 +193,7 @@ server <- function(input, output, session) {
     edges %>% filter(from %in% ids, to %in% ids)
   })
   
+  # Render the network graph.
   output$network <- renderVisNetwork({
     req(nrow(filtered_nodes_no_isolates()) > 0)
     
@@ -229,8 +219,7 @@ server <- function(input, output, session) {
       visGroups(groupname = "Hospital", color = "#1764a2") %>%
       visEdges(smooth = FALSE) %>%
       visOptions(
-        highlightNearest = TRUE,
-        nodesIdSelection = TRUE
+        highlightNearest = TRUE
       ) %>%
       visInteraction(navigationButtons = TRUE) %>%
       visPhysics(
@@ -241,11 +230,13 @@ server <- function(input, output, session) {
       )
   })
   
+  # Render the people table.
   output$people_table <- renderDT({
     filtered_nodes_no_isolates() %>%
       select(name, institution, dept, region, is_admin, keywords)
   })
   
+  # Render the selected person's profile summary.
   observeEvent(input$network_selectedNodes, {
     selected_id <- input$network_selectedNodes[1]
     
@@ -255,7 +246,7 @@ server <- function(input, output, session) {
       return()
     }
     
-    # List this person's projects nicely
+    # List this person's projects in the profile panel.
     person_projects <- memberships %>%
       filter(user_id == selected_id) %>%
       distinct(project_id, project_name, role) %>%
